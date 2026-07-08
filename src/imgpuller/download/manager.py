@@ -87,6 +87,14 @@ class DownloadManager:
         """
         all_digests = resolved.all_blob_digests
 
+        # Map each blob digest to its declared size from the manifest so the
+        # progress bars can show concrete totals (bytes downloaded / total).
+        size_map: dict[str, int] = {
+            resolved.config_digest: resolved.manifest.config.size,
+        }
+        for layer in resolved.manifest.layers:
+            size_map[layer.digest] = layer.size
+
         # Create output directories
         self.blobs_dir.mkdir(parents=True, exist_ok=True)
 
@@ -160,9 +168,24 @@ class DownloadManager:
                     """Download a single blob with retries."""
                     async with semaphore:
                         blob_path = self._blob_path(digest)
+                        expected_size = size_map.get(digest) or None
+
+                        # Compute the resume offset using the same condition
+                        # as the worker (state + partial file present) so the
+                        # progress bar start matches the real download offset.
+                        temp_path = blob_path.with_suffix(
+                            blob_path.suffix + ".partial"
+                        )
+                        state_data = self.state.read_blob_state(digest)
+                        if state_data and temp_path.exists():
+                            offset = temp_path.stat().st_size
+                        else:
+                            offset = 0
+
                         layer_task = progress.add_task(
                             f"  {digest[:19]}...",
-                            total=None,  # indeterminate until we know size
+                            total=expected_size,
+                            completed=offset if expected_size else 0,
                         )
 
                         worker = BlobDownloadWorker(
@@ -171,6 +194,7 @@ class DownloadManager:
                             digest=digest,
                             output_path=blob_path,
                             state=self.state,
+                            expected_size=expected_size,
                             verify=self.verify,
                             progress_callback=lambda n: progress.update(
                                 layer_task, advance=n

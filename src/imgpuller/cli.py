@@ -269,9 +269,17 @@ def pull(
             console.print(
                 f"  Manifest: {resolved.manifest.media_type}"
             )
+            layers = resolved.manifest.layers
+            total_layer_size = sum(layer.size for layer in layers)
             console.print(
-                f"  Layers:   {len(resolved.layer_digests)}"
+                f"  Layers:   {len(layers)} "
+                f"({_format_size(total_layer_size)} total)"
             )
+            for i, layer in enumerate(layers):
+                console.print(
+                    f"    [{i}] {layer.digest[:19]}... "
+                    f"{_format_size(layer.size)}"
+                )
 
             # Download blobs into the work directory
             download_mgr = DownloadManager(
