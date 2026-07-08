@@ -25,7 +25,6 @@ from rich.progress import (
 from imgpuller import __version__
 from imgpuller.config import (
     Platform,
-    detect_current_platform,
     get_credentials_for_registry,
     get_default_output_file,
     load_docker_config,
@@ -221,14 +220,9 @@ def pull(
     # Resolve registry URL
     registry_url = resolve_registry_url(image_ref.registry, insecure=insecure)
 
-    console.print(f"[bold]Pulling image:[/] {image_ref}")
-    console.print(f"  Registry:  {registry_url}")
-    console.print(f"  Platform:  {target_platform or detect_current_platform()}")
-    console.print(f"  Output:    {output_file.absolute()}")
-    console.print(f"  Work dir:  {work_dir.absolute()}")
-
+    console.print(f"[bold]{image_ref}[/]")
     if target_platform:
-        console.print(f"  Platform:  {target_platform}")
+        console.print(f"  platform: [dim]{target_platform}[/]")
 
     # Main async workflow
     async def run():
@@ -255,30 +249,13 @@ def pull(
                 SpinnerColumn(),
                 TextColumn("[progress.description]{task.description}"),
                 console=console,
+                transient=True,
             ) as progress:
-                task = progress.add_task(
-                    "Resolving manifest...", total=None
-                )
+                progress.add_task("Resolving manifest...", total=None)
                 resolved = await resolver.resolve(
                     name=image_ref.name,
                     reference=image_ref.reference,
                     platform=target_platform,
-                )
-                progress.update(task, description="[green]✓[/] Manifest resolved")
-
-            console.print(
-                f"  Manifest: {resolved.manifest.media_type}"
-            )
-            layers = resolved.manifest.layers
-            total_layer_size = sum(layer.size for layer in layers)
-            console.print(
-                f"  Layers:   {len(layers)} "
-                f"({_format_size(total_layer_size)} total)"
-            )
-            for i, layer in enumerate(layers):
-                console.print(
-                    f"    [{i}] {layer.digest[:19]}... "
-                    f"{_format_size(layer.size)}"
                 )
 
             # Download blobs into the work directory
@@ -316,16 +293,11 @@ def pull(
 
                 shutil.rmtree(work_dir, ignore_errors=True)
             else:
-                console.print(f"  Blobs:    {work_dir.absolute()} (kept)")
+                console.print(f"  blobs:    {work_dir.absolute()}")
 
             console.print()
-            console.print("[bold green]✓ Image pulled successfully[/]")
-            console.print(f"  Location: {tar_path.absolute()}")
-            console.print()
-            console.print("[bold]Load with:[/]")
-            console.print(
-                f"  docker load -i {tar_path}"
-            )
+            console.print(f"[green]✓[/] {image_ref} → {tar_path.absolute()}")
+            console.print(f"  [dim]docker load -i {tar_path}[/]")
 
         finally:
             await client.close()

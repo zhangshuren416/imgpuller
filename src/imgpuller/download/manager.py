@@ -14,7 +14,6 @@ from rich.progress import (
     BarColumn,
     DownloadColumn,
     Progress,
-    SpinnerColumn,
     TextColumn,
     TimeRemainingColumn,
     TransferSpeedColumn,
@@ -118,27 +117,25 @@ class DownloadManager:
                     else:
                         # Corrupt, re-download
                         logger.warning(
-                            "Corrupt blob detected, re-downloading: %s",
-                            digest[:19],
+                            "Corrupt blob %s, re-downloading", digest[:19],
                         )
                         blob_path.unlink()
                         self.state.delete_blob_state(digest)
                 except Exception as e:
                     logger.warning(
-                        "Failed to verify existing blob %s: %s",
-                        digest[:19], e,
+                        "Verify failed for %s: %s", digest[:19], e,
                     )
 
             pending.append(digest)
 
         if not pending:
-            logger.info("All %d blobs already downloaded and verified", len(all_digests))
+            logger.info("All %d blobs already present", len(all_digests))
             if progress:
-                progress.log("[green]All blobs already downloaded ✓")
+                progress.log("[green]✓ Already up to date[/]")
             return True
 
         logger.info(
-            "Downloading %d blobs (%d already complete)",
+            "Downloading %d blobs (%d cached)",
             len(pending), len(completed),
         )
 
@@ -146,9 +143,8 @@ class DownloadManager:
         own_progress = progress is None
         if own_progress:
             progress = Progress(
-                SpinnerColumn(),
                 TextColumn("[progress.description]{task.description}"),
-                BarColumn(),
+                BarColumn(bar_width=20),
                 DownloadColumn(),
                 TransferSpeedColumn(),
                 TimeRemainingColumn(),
@@ -157,11 +153,6 @@ class DownloadManager:
 
         try:
             with progress:
-                overall_task = progress.add_task(
-                    f"[bold]Downloading {len(pending)} blobs",
-                    total=len(pending),
-                )
-
                 semaphore = asyncio.Semaphore(self.concurrency)
 
                 async def download_one(digest: str, index: int) -> tuple[str, bool]:
@@ -183,7 +174,7 @@ class DownloadManager:
                             offset = 0
 
                         layer_task = progress.add_task(
-                            f"  {digest[:19]}...",
+                            f"{digest[:19]}: Downloading",
                             total=expected_size,
                             completed=offset if expected_size else 0,
                         )
@@ -207,42 +198,37 @@ class DownloadManager:
                                 if success:
                                     progress.update(
                                         layer_task,
-                                        description=f"  [green]✓[/] {digest[:19]}",
-                                        completed=True,
+                                        description=f"{digest[:19]}: [green]Pull complete[/]",
                                     )
-                                    progress.advance(overall_task)
                                     return digest, True
                             except DigestMismatchError:
                                 # Don't retry - data is wrong server-side
                                 progress.update(
                                     layer_task,
-                                    description=f"  [red]✗[/] {digest[:19]} (BAD DIGEST)",
+                                    description=f"{digest[:19]}: [red]BAD DIGEST[/]",
                                 )
-                                progress.advance(overall_task)
                                 raise
                             except DownloadInterruptedError as e:
                                 if attempt < MAX_RETRIES - 1:
                                     delay = RETRY_BASE_DELAY * (2 ** attempt)
                                     progress.update(
                                         layer_task,
-                                        description=f"  [yellow]↻[/] {digest[:19]} retry in {delay:.0f}s",
+                                        description=f"{digest[:19]}: [yellow]retry in {delay:.0f}s[/]",
                                     )
                                     await asyncio.sleep(delay)
                                 else:
                                     progress.update(
                                         layer_task,
-                                        description=f"  [red]✗[/] {digest[:19]} (FAILED)",
+                                        description=f"{digest[:19]}: [red]failed[/]",
                                     )
-                                    progress.advance(overall_task)
                                     raise DownloadError(
                                         f"Blob {digest[:19]} failed after {MAX_RETRIES} attempts: {e}"
                                     ) from e
                             except Exception as e:
                                 progress.update(
                                     layer_task,
-                                    description=f"  [red]✗[/] {digest[:19]} ({type(e).__name__})",
+                                    description=f"{digest[:19]}: [red]{type(e).__name__}[/]",
                                 )
-                                progress.advance(overall_task)
                                 raise
 
                         return digest, False
@@ -273,7 +259,7 @@ class DownloadManager:
                     completed_digests=list(all_digests),
                 )
 
-                progress.log("[green]✓ All blobs downloaded and verified")
+                progress.log("[green]✓ All layers pulled[/]")
                 return True
 
         finally:

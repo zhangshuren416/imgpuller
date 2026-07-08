@@ -104,13 +104,12 @@ class BlobDownloadWorker:
             # Use actual file size, not saved state (process could have been
             # killed before saving state)
             actual_size = temp_path.stat().st_size
-            saved_size = state_data.get("completed_bytes", 0)
 
             if actual_size > 0:
                 offset = actual_size
                 logger.info(
-                    "Resuming %s from byte %d (saved: %d, actual: %d)",
-                    self.short_digest, offset, saved_size, actual_size,
+                    "Resuming %s from byte %d",
+                    self.short_digest, offset,
                 )
             else:
                 # Empty temp file, start from scratch
@@ -143,7 +142,6 @@ class BlobDownloadWorker:
                 total_written = offset
 
                 # Stream from registry
-                chunk_count = 0
                 async for chunk in self.client.get_blob(
                     self.image_name, self.digest, offset=offset,
                 ):
@@ -153,7 +151,6 @@ class BlobDownloadWorker:
                     chunk_len = len(chunk)
                     total_written += chunk_len
                     bytes_since_last_save += chunk_len
-                    chunk_count += 1
 
                     # Progress callback
                     self.progress_callback(chunk_len)
@@ -177,7 +174,7 @@ class BlobDownloadWorker:
                 # Verify
                 if self.verify and actual_digest != expected_digest:
                     logger.error(
-                        "Digest mismatch for %s:\n  Expected: %s\n  Got:      %s",
+                        "Digest mismatch for %s: expected %s, got %s",
                         self.short_digest, expected_digest, actual_digest,
                     )
                     temp_path.unlink(missing_ok=True)
@@ -195,8 +192,8 @@ class BlobDownloadWorker:
                 self.state.delete_blob_state(self.digest)
 
                 logger.info(
-                    "Downloaded and verified %s (%d bytes, %d chunks)",
-                    self.short_digest, total_written, chunk_count,
+                    "Downloaded %s (%d bytes)",
+                    self.short_digest, total_written,
                 )
 
                 return True
