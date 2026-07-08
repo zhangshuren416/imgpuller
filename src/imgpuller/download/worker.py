@@ -210,6 +210,13 @@ class BlobDownloadWorker:
                 f"Download interrupted for {self.short_digest}: {e}"
             ) from e
 
+        except (asyncio.CancelledError, KeyboardInterrupt):
+            # Save progress before cancellation so resume works
+            if temp_path.exists():
+                sz = temp_path.stat().st_size
+                await self._save_progress(sz, temp_path, 0, force=True)
+            raise
+
         except Exception:
             # Don't save state for unexpected errors - might be corrupt
             temp_path.unlink(missing_ok=True)

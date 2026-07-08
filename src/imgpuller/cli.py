@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import signal
 import sys
 from pathlib import Path
 
@@ -302,6 +303,14 @@ def pull(
         finally:
             await client.close()
 
+    def _handle_sigterm(sig, frame):
+        """Convert SIGTERM to KeyboardInterrupt for graceful shutdown."""
+        raise KeyboardInterrupt()
+
+    # Register SIGTERM handler so `kill <pid>` triggers graceful state save.
+    original_sigterm = signal.getsignal(signal.SIGTERM)
+    signal.signal(signal.SIGTERM, _handle_sigterm)
+
     try:
         asyncio.run(run())
     except KeyboardInterrupt:
@@ -316,6 +325,8 @@ def pull(
         if logging.getLogger().level <= logging.DEBUG:
             console.print_exception()
         sys.exit(1)
+    finally:
+        signal.signal(signal.SIGTERM, original_sigterm)
 
 
 @main.command()

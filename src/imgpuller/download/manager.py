@@ -234,10 +234,27 @@ class DownloadManager:
                         return digest, False
 
                 # Run all downloads with concurrency limit
-                results = await asyncio.gather(
-                    *[download_one(d, i) for i, d in enumerate(pending)],
-                    return_exceptions=True,
-                )
+                # Use tasks instead of bare coroutines so we can cancel
+                # them gracefully and wait for state-saving cleanup.
+                tasks = [
+                    asyncio.create_task(download_one(d, i))
+                    for i, d in enumerate(pending)
+                ]
+                try:
+                    results = await asyncio.gather(
+                        *tasks,
+                        return_exceptions=True,
+                    )
+                except (KeyboardInterrupt, asyncio.CancelledError):
+                    # Graceful shutdown: cancel all tasks and wait for them
+                    # to save their state before re-raising.
+                    for t in tasks:
+                        if not t.done():
+                            t.cancel()
+                    # Wait for all tasks to finish their CancelledError handling
+                    # (which now includes state saving in the worker).
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                    raise
 
                 # Check results
                 failures = []
