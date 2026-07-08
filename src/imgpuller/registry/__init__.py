@@ -1,0 +1,1 @@
+"""Registry client and authentication."""
