@@ -5,16 +5,16 @@
 
 **imgpuller** 是一个不依赖 Docker/Podman CLI，直接通过 HTTP 从 OCI 兼容的 Registry 拉取镜像的工具。
 
-它将镜像层下载到本地并保存为标准的 **OCI Layout** 格式，支持断点续传、并行下载、SHA256 完整性校验。
+它将镜像层下载并在本地打包成单个 **docker-archive `.tar`** 文件，可直接用 `docker load -i` 导入。支持断点续传、并行下载、SHA256 完整性校验。
 
 ## 特性
 
 - **纯 HTTP 下载**：直接通过 Docker Registry HTTP API V2 下载镜像层，无需 Docker/Podman 守护进程
-- **断点续传**：下载中断后重新运行即可从断点恢复，状态持久化到 `.imgpuller-state/`
-- **完整性校验**：流式 SHA256 计算，边下载边校验，确保每一层数据正确
+- **单文件输出**：拉取后直接生成 `docker save` 兼容的 `.tar`，`docker load -i xxx.tar` 即可导入
+- **断点续传**：下载中断后重新运行即可从断点恢复，状态持久化到 `<name>.blobs/.imgpuller-state/`
+- **完整性校验**：流式 SHA256 计算，边下载边校验；打包时再次校验每层 diff ID
 - **并行下载**：多层并发下载，可配置并发数 (1-16)
 - **多架构支持**：自动解析 manifest list，按平台选择匹配的镜像
-- **标准 OCI Layout**：输出兼容 `skopeo`、`podman`、`docker` 的标准格式
 - **认证支持**：Token 认证 (Bearer)、Basic 认证、Docker config.json 证书读取
 - **代理支持**：支持 HTTP/HTTPS 代理，自动读取 `HTTP_PROXY`/`HTTPS_PROXY` 环境变量
 
@@ -40,11 +40,11 @@ imgpuller --help
 ### 拉取公开镜像
 
 ```bash
-# 拉取 ubuntu:22.04 到当前目录
+# 拉取 ubuntu:22.04，输出 ubuntu-22.04.tar
 imgpuller pull ubuntu:22.04
 
-# 指定输出目录
-imgpuller pull -o ./my-images/ubuntu ubuntu:22.04
+# 指定输出 .tar 文件
+imgpuller pull -o ./my-image.tar ubuntu:22.04
 
 # 指定平台
 imgpuller pull --platform linux/arm64 nginx:alpine
@@ -82,12 +82,15 @@ imgpuller pull ghcr.io/myorg/private-app:v1
 ### 导入到 Docker/Podman
 
 ```bash
-# 拉取镜像后，使用 skopeo 导入到本地 Docker
-imgpuller pull ubuntu:22.04 -o ./ubuntu-22.04
-skopeo copy oci:./ubuntu-22.04 docker-daemon:ubuntu:22.04
+# 拉取镜像后，直接用 docker load 导入
+imgpuller pull ubuntu:22.04
+docker load -i ubuntu-22.04.tar
 
 # 使用 podman 加载
-podman pull oci:./ubuntu-22.04
+podman load -i ubuntu-22.04.tar
+
+# 校验 .tar 完整性
+imgpuller verify ubuntu-22.04.tar
 ```
 
 ## CLI 命令
@@ -102,7 +105,7 @@ imgpuller pull [OPTIONS] IMAGE
 |------|------|
 | `IMAGE` | 镜像引用，如 `ubuntu:22.04`, `ghcr.io/org/app:v1` |
 | `--platform` | 目标平台，格式 `os/arch[/variant]`，默认当前系统 |
-| `-o, --output` | 输出目录，默认 `./<镜像名>-<tag>` |
+| `-o, --output` | 输出 `.tar` 文件路径，默认 `./<镜像名>-<tag>.tar` |
 | `--registry` | 显式指定 registry URL |
 | `-u, --username` | Registry 用户名 |
 | `--password-stdin` | 从 stdin 读取密码 |
@@ -111,6 +114,7 @@ imgpuller pull [OPTIONS] IMAGE
 | `--insecure` | 允许 HTTP 连接 |
 | `--no-verify` | 跳过 SHA256 校验 |
 | `--no-resume` | 不恢复之前的下载进度 |
+| `--keep-blobs` | 生成 `.tar` 后保留中间 blob 下载目录 |
 | `-v, -vv` | 详细/调试输出 |
 
 支持的镜像引用格式：
@@ -129,11 +133,11 @@ imgpuller inspect alpine:latest
 # 输出: 媒体类型、平台、层数、每层大小、总大小
 ```
 
-### `verify` — 校验 OCI Layout
+### `verify` — 校验 tar 镜像
 
 ```bash
-imgpuller verify ./my-output-dir
-# 输出: 验证所有 blob 的 SHA256 摘要，检查布局完整性
+imgpuller verify ./my-image.tar
+# 输出: 校验 config、每层 layer.tar 的 SHA256 diff ID 及 chain ID 一致性
 ```
 
 ## 断点续传
@@ -142,30 +146,32 @@ imgpuller verify ./my-output-dir
 
 ```bash
 # 第一次运行 — 下载到一半被中断
-imgpuller pull ubuntu:22.04 -o ./output
+imgpuller pull ubuntu:22.04 -o ./ubuntu-22.04.tar
 # ^C
 
-# 第二次运行 — 自动从中断处继续
-imgpuller pull ubuntu:22.04 -o ./output
+# 第二次运行 — 自动从中断处继续（复用 ./ubuntu-22.04.blobs/ 里的分片）
+imgpuller pull ubuntu:22.04 -o ./ubuntu-22.04.tar
 # 输出: Resuming sha256:xxx from byte 52428800
 ```
 
-状态文件存储在 `<output>/.imgpuller-state/`，下载完成后自动清理。
+中间分片与状态文件存储在 `<output>.blobs/.imgpuller-state/`，成功生成 `.tar` 后默认自动清理（可用 `--keep-blobs` 保留）。
 
 ## 输出格式
 
-生成的 OCI Layout 目录结构：
+生成的 `docker save` 兼容 `.tar` 结构：
 
 ```
-<output>/
-├── oci-layout          {"imageLayoutVersion": "1.0.0"}
-├── index.json          指向 manifest 的索引
-└── blobs/
-    └── sha256/
-        ├── <config-digest>         镜像配置 (JSON)
-        ├── <manifest-digest>       Manifest (JSON)
-        └── <layer-digest>          层文件 (tar.gz)
+<output>.tar
+├── manifest.json          [{"Config","RepoTags","Layers"}]
+├── repositories           {"repo": {"tag": "<top-chain-id>"}}
+├── <config-digest>.json   镜像配置 (JSON)
+└── <chain-id>/
+    ├── layer.tar          未压缩的层 (tar)
+    ├── VERSION            "1.0"
+    └── json               层元数据
 ```
+
+其中 chain-id 由 config 中 `rootfs.diff_ids` 逐层计算（第一层为 diff id，之后为 `sha256(parent + " " + child)`）。
 
 ## 项目结构
 
@@ -189,7 +195,8 @@ imgpuller/
     ├── verification/
     │   └── hasher.py         # 流式 SHA256 校验
     └── oci/
-        └── layout.py         # OCI Layout 格式写入
+        ├── docker_save.py     # docker-archive .tar 生成与校验
+        └── layout.py          # OCI Layout 格式写入（可选）
 ```
 
 ## 异常退出码
@@ -202,7 +209,7 @@ imgpuller/
 | 3 | Registry 错误 (认证失败、API 不可用) |
 | 4 | 下载错误 (校验失败、网络中断) |
 | 5 | Manifest/平台未找到 |
-| 6 | OCI Layout 写入错误 |
+| 6 | tar 归档写入/校验错误 |
 
 ## License
 

@@ -14,14 +14,11 @@ import logging
 import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Optional
 
 import aiohttp
 
 from imgpuller.config import (
     RegistryCredentials,
-    get_credentials_for_registry,
-    load_docker_config,
 )
 
 logger = logging.getLogger(__name__)
@@ -53,11 +50,9 @@ def parse_www_authenticate(header: str) -> WWWAuthenticateChallenge | None:
     if not header:
         return None
 
-    # Match: Bearer realm="...", service="...", scope="..."
-    pattern = r'(?:Bearer|Basic)\s+'
+    # Extract key="value" pairs from Bearer/Basic challenge header
     params = {}
 
-    # Extract key="value" pairs
     for match in re.finditer(r'(\w+)=("[^"]*"|[^,]+)', header):
         key = match.group(1).lower()
         value = match.group(2).strip('"')

@@ -6,10 +6,8 @@ import base64
 import json
 import os
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
-from urllib.parse import urlparse
 
 from imgpuller.exceptions import InvalidImageReferenceError
 
@@ -114,7 +112,7 @@ def parse_image_reference(image: str) -> ImageReference:
         InvalidImageReferenceError: If the reference cannot be parsed.
     """
     if not image or not image.strip():
-        raise InvalidImageReferenceError(f"Empty image reference")
+        raise InvalidImageReferenceError("Empty image reference")
 
     image = image.strip()
 
@@ -192,14 +190,23 @@ def parse_image_reference(image: str) -> ImageReference:
     )
 
 
-def get_default_output_dir(image_ref: ImageReference) -> str:
-    """Get default output directory name from an image reference."""
-    # e.g., library/ubuntu:22.04 -> ubuntu-22.04
+def get_default_output_file(image_ref: ImageReference) -> str:
+    """Get default output .tar filename from an image reference.
+
+    e.g. library/ubuntu:22.04 -> ubuntu-22.04.tar
+         library/ubuntu@sha256:abc... -> ubuntu-<short>.tar
+    """
     name_part = image_ref.name.split("/")[-1]
     if image_ref.is_digest:
         short_digest = image_ref.reference.replace("sha256:", "")[:12]
-        return f"{name_part}-{short_digest}"
-    return f"{name_part}-{image_ref.reference}"
+        stem = f"{name_part}-{short_digest}"
+    else:
+        stem = f"{name_part}-{image_ref.reference}"
+    return f"{stem}.tar"
+
+
+# Backwards-compatible alias.
+get_default_output_dir = get_default_output_file
 
 
 def load_docker_config(config_path: Path | None = None) -> dict:
@@ -270,7 +277,7 @@ def get_credentials_for_registry(
         f"https://{registry}",
         f"http://{registry}",
         f"https://{registry}/v1/",  # Docker Hub specific
-        f"https://index.docker.io/v1/",  # Docker Hub legacy
+        "https://index.docker.io/v1/",  # Docker Hub legacy
     ]
 
     # Docker Hub special case

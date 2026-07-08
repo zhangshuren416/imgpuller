@@ -15,7 +15,7 @@ from imgpuller.config import (
     ImageReference,
     Platform,
     detect_current_platform,
-    get_default_output_dir,
+    get_default_output_file,
     parse_image_reference,
     resolve_registry_url,
 )
@@ -24,9 +24,11 @@ from imgpuller.exceptions import (
     DigestMismatchError,
     InvalidImageReferenceError,
     ManifestNotFoundError,
+    OCILayoutError,
     PlatformNotFoundError,
 )
 from imgpuller.manifest.resolver import ManifestResolver, compute_digest
+from imgpuller.oci.docker_save import DockerSaveWriter
 from imgpuller.oci.layout import OCILayoutWriter
 from imgpuller.verification.hasher import (
     StreamingHashWriter,
@@ -439,18 +441,313 @@ class TestOCILayoutWriter:
 # ── Config Utilities ──
 
 class TestConfigUtilities:
-    def test_default_output_dir_tag(self):
+    def test_default_output_file_tag(self):
         ref = parse_image_reference("ubuntu:22.04")
-        assert get_default_output_dir(ref) == "ubuntu-22.04"
+        assert get_default_output_file(ref) == "ubuntu-22.04.tar"
 
-    def test_default_output_dir_digest(self):
+    def test_default_output_file_digest(self):
         digest = "sha256:abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"
         ref = parse_image_reference(f"ubuntu@{digest}")
-        d = get_default_output_dir(ref)
+        d = get_default_output_file(ref)
         assert d.startswith("ubuntu-")
-        assert len(d) == len("ubuntu-") + 12  # short digest
+        assert d.endswith(".tar")
+        assert len(d) == len("ubuntu-") + 12 + len(".tar")  # short digest
 
     def test_image_reference_str(self):
         ref = parse_image_reference("ubuntu:22.04")
         assert "ubuntu" in str(ref)
         assert "22.04" in str(ref)
+
+
+# ── Docker Save Writer ──
+
+class TestDockerSaveWriter:
+    """Test docker-archive .tar generation and verification."""
+
+    @staticmethod
+    def _make_layer(files: dict[str, bytes]) -> tuple[bytes, str, str]:
+        """Build a gzip-compressed tar layer.
+
+        Returns (compressed_blob, compressed_digest, diff_id) where
+        diff_id is the SHA256 of the uncompressed tar.
+        """
+        import gzip
+        import io
+        import tarfile
+
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w") as t:
+            for name, content in files.items():
+                info = tarfile.TarInfo(name=name)
+                info.size = len(content)
+                t.addfile(info, io.BytesIO(content))
+        tar_data = buf.getvalue()
+        diff_id = f"sha256:{hashlib.sha256(tar_data).hexdigest()}"
+        blob = gzip.compress(tar_data)
+        compressed_digest = f"sha256:{hashlib.sha256(blob).hexdigest()}"
+        return blob, compressed_digest, diff_id
+
+    @staticmethod
+    def _make_resolved(config_bytes, config_digest, layers, manifest_bytes):
+        """Build a ResolvedImage from config + layer descriptors."""
+        from imgpuller.manifest.resolver import (
+            ImageManifest, Descriptor, ResolvedImage,
+        )
+
+        img_manifest = ImageManifest(
+            schema_version=2,
+            media_type="application/vnd.oci.image.manifest.v1+json",
+            config=Descriptor(
+                media_type="application/vnd.oci.image.config.v1+json",
+                digest=config_digest,
+                size=len(config_bytes),
+            ),
+            layers=[
+                Descriptor(
+                    media_type="application/vnd.oci.image.layer.v1.tar+gzip",
+                    digest=ld,
+                    size=ls,
+                )
+                for ld, ls, _ in layers
+            ],
+            raw_bytes=manifest_bytes,
+        )
+        return ResolvedImage(
+            manifest=img_manifest,
+            config_digest=config_digest,
+            layer_digests=[ld for ld, _, _ in layers],
+            platform=Platform(os="linux", architecture="amd64"),
+            annotations={},
+        )
+
+    def _write_blobs(self, blobs_dir, config_hex, config_bytes, layers):
+        blobs_dir.mkdir(parents=True, exist_ok=True)
+        (blobs_dir / config_hex).write_bytes(config_bytes)
+        for (ld, _, blob) in layers:
+            (blobs_dir / ld.split(":", 1)[1]).write_bytes(blob)
+        return blobs_dir
+
+    def test_write_single_layer_and_verify(self, tmp_path):
+        blob, layer_digest, diff_id = self._make_layer({"etc/hello": b"world"})
+        config = {
+            "architecture": "amd64",
+            "os": "linux",
+            "rootfs": {"type": "layers", "diff_ids": [diff_id]},
+            "history": [],
+        }
+        config_bytes = json.dumps(config).encode()
+        config_digest = compute_bytes_digest(config_bytes)
+        config_hex = config_digest.split(":", 1)[1]
+
+        manifest = {
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "config": {
+                "mediaType": "application/vnd.oci.image.config.v1+json",
+                "digest": config_digest,
+                "size": len(config_bytes),
+            },
+            "layers": [
+                {
+                    "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+                    "digest": layer_digest,
+                    "size": len(blob),
+                }
+            ],
+        }
+        manifest_bytes = json.dumps(manifest).encode()
+
+        blobs_dir = tmp_path / "blobs" / "sha256"
+        self._write_blobs(
+            blobs_dir, config_hex, config_bytes,
+            [(layer_digest, len(blob), blob)],
+        )
+
+        resolved = self._make_resolved(
+            config_bytes, config_digest,
+            [(layer_digest, len(blob), blob)], manifest_bytes,
+        )
+        image_ref = parse_image_reference("myapp:1.0")
+
+        output_tar = tmp_path / "myapp-1.0.tar"
+        writer = DockerSaveWriter(output_tar)
+        writer.write(resolved, blobs_dir=blobs_dir, image_ref=image_ref)
+
+        assert output_tar.exists()
+        chain_id = diff_id.split(":", 1)[1]  # single layer chain id == diff id
+        import tarfile
+
+        with tarfile.open(output_tar) as t:
+            names = set(t.getnames())
+            assert "manifest.json" in names
+            assert "repositories" in names
+            assert f"{config_hex}.json" in names
+            assert f"{chain_id}/layer.tar" in names
+            assert f"{chain_id}/VERSION" in names
+            assert f"{chain_id}/json" in names
+
+            mf = json.loads(t.extractfile("manifest.json").read())[0]
+            assert mf["Config"] == f"{config_hex}.json"
+            assert mf["RepoTags"] == ["myapp:1.0"]
+            assert mf["Layers"] == [f"{chain_id}/layer.tar"]
+
+            repos = json.loads(t.extractfile("repositories").read())
+            assert repos == {"library/myapp": {"1.0": chain_id}}
+
+        # Verify passes.
+        result = DockerSaveWriter(output_tar).verify()
+        assert result["status"] == "ok", result["errors"]
+        assert result["valid"] == result["checked"]
+
+    def test_write_multi_layer_chain_ids(self, tmp_path):
+        blob0, dig0, diff0 = self._make_layer({"a": b"1"})
+        blob1, dig1, diff1 = self._make_layer({"b": b"2"})
+        diff0_hex = diff0.split(":", 1)[1]
+        diff1_hex = diff1.split(":", 1)[1]
+        # chain ids
+        chain0 = diff0_hex
+        chain1 = hashlib.sha256(f"{chain0} {diff1_hex}".encode()).hexdigest()
+
+        config = {
+            "architecture": "amd64",
+            "os": "linux",
+            "rootfs": {"type": "layers", "diff_ids": [diff0, diff1]},
+            "history": [],
+        }
+        config_bytes = json.dumps(config).encode()
+        config_digest = compute_bytes_digest(config_bytes)
+        config_hex = config_digest.split(":", 1)[1]
+
+        manifest = {
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "config": {
+                "mediaType": "application/vnd.oci.image.config.v1+json",
+                "digest": config_digest,
+                "size": len(config_bytes),
+            },
+            "layers": [
+                {"mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+                 "digest": dig0, "size": len(blob0)},
+                {"mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+                 "digest": dig1, "size": len(blob1)},
+            ],
+        }
+        manifest_bytes = json.dumps(manifest).encode()
+
+        blobs_dir = tmp_path / "blobs" / "sha256"
+        self._write_blobs(
+            blobs_dir, config_hex, config_bytes,
+            [(dig0, len(blob0), blob0), (dig1, len(blob1), blob1)],
+        )
+        resolved = self._make_resolved(
+            config_bytes, config_digest,
+            [(dig0, len(blob0), blob0), (dig1, len(blob1), blob1)],
+            manifest_bytes,
+        )
+        image_ref = parse_image_reference("ghcr.io/org/app:v2")
+
+        output_tar = tmp_path / "app-v2.tar"
+        DockerSaveWriter(output_tar).write(
+            resolved, blobs_dir=blobs_dir, image_ref=image_ref,
+        )
+
+        import tarfile
+
+        with tarfile.open(output_tar) as t:
+            mf = json.loads(t.extractfile("manifest.json").read())[0]
+            assert mf["RepoTags"] == ["ghcr.io/org/app:v2"]
+            assert mf["Layers"] == [
+                f"{chain0}/layer.tar", f"{chain1}/layer.tar",
+            ]
+            repos = json.loads(t.extractfile("repositories").read())
+            assert repos == {"ghcr.io/org/app": {"v2": chain1}}
+
+        result = DockerSaveWriter(output_tar).verify()
+        assert result["status"] == "ok", result["errors"]
+
+    def test_write_digest_ref_no_tags(self, tmp_path):
+        blob, layer_digest, diff_id = self._make_layer({"x": b"y"})
+        config = {
+            "architecture": "amd64", "os": "linux",
+            "rootfs": {"type": "layers", "diff_ids": [diff_id]},
+            "history": [],
+        }
+        config_bytes = json.dumps(config).encode()
+        config_digest = compute_bytes_digest(config_bytes)
+        config_hex = config_digest.split(":", 1)[1]
+        manifest = {
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "config": {"mediaType": "application/vnd.oci.image.config.v1+json",
+                       "digest": config_digest, "size": len(config_bytes)},
+            "layers": [{"mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+                        "digest": layer_digest, "size": len(blob)}],
+        }
+        manifest_bytes = json.dumps(manifest).encode()
+
+        blobs_dir = tmp_path / "blobs" / "sha256"
+        self._write_blobs(
+            blobs_dir, config_hex, config_bytes,
+            [(layer_digest, len(blob), blob)],
+        )
+        resolved = self._make_resolved(
+            config_bytes, config_digest,
+            [(layer_digest, len(blob), blob)], manifest_bytes,
+        )
+        image_ref = parse_image_reference(
+            f"ubuntu@sha256:{'a' * 64}"
+        )
+
+        output_tar = tmp_path / "ubuntu.tar"
+        DockerSaveWriter(output_tar).write(
+            resolved, blobs_dir=blobs_dir, image_ref=image_ref,
+        )
+
+        import tarfile
+
+        with tarfile.open(output_tar) as t:
+            mf = json.loads(t.extractfile("manifest.json").read())[0]
+            assert mf["RepoTags"] is None
+            repos = json.loads(t.extractfile("repositories").read())
+            assert repos == {}
+
+    def test_verify_detects_corrupt_layer(self, tmp_path):
+        blob, layer_digest, diff_id = self._make_layer({"f": b"g"})
+        # Tamper the declared diff id so verification must fail.
+        wrong_diff = "sha256:" + "0" * 64
+        config = {
+            "architecture": "amd64", "os": "linux",
+            "rootfs": {"type": "layers", "diff_ids": [wrong_diff]},
+            "history": [],
+        }
+        config_bytes = json.dumps(config).encode()
+        config_digest = compute_bytes_digest(config_bytes)
+        config_hex = config_digest.split(":", 1)[1]
+        manifest = {
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "config": {"mediaType": "application/vnd.oci.image.config.v1+json",
+                       "digest": config_digest, "size": len(config_bytes)},
+            "layers": [{"mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+                        "digest": layer_digest, "size": len(blob)}],
+        }
+        manifest_bytes = json.dumps(manifest).encode()
+
+        blobs_dir = tmp_path / "blobs" / "sha256"
+        self._write_blobs(
+            blobs_dir, config_hex, config_bytes,
+            [(layer_digest, len(blob), blob)],
+        )
+        resolved = self._make_resolved(
+            config_bytes, config_digest,
+            [(layer_digest, len(blob), blob)], manifest_bytes,
+        )
+        image_ref = parse_image_reference("myapp:1.0")
+        output_tar = tmp_path / "bad.tar"
+
+        # write() itself rejects a diff-id mismatch.
+        with pytest.raises(OCILayoutError):
+            DockerSaveWriter(output_tar).write(
+                resolved, blobs_dir=blobs_dir, image_ref=image_ref,
+            )

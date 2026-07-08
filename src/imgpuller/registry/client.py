@@ -14,7 +14,7 @@ import asyncio
 import logging
 import os
 from dataclasses import dataclass
-from typing import AsyncIterator, Optional
+from typing import AsyncIterator
 
 import aiohttp
 
@@ -343,6 +343,13 @@ class RegistryClient:
                         f"Authentication failed for {url}"
                     )
 
+                # On success, return without consuming the body so the caller
+                # can stream it via iter_chunked(). Reading resp.text() here
+                # would drain the stream and yield zero chunks downstream,
+                # causing empty downloads and BAD DIGEST failures.
+                if 200 <= resp.status < 300:
+                    return resp
+                # Error response: read body for diagnostics (no streaming needed).
                 self._check_response_status(resp, await resp.text())
                 return resp
 

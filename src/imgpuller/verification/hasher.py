@@ -9,7 +9,7 @@ from __future__ import annotations
 import hashlib
 import logging
 from pathlib import Path
-from typing import BinaryIO, Optional
+from typing import BinaryIO
 
 logger = logging.getLogger(__name__)
 

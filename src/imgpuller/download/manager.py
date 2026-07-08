@@ -9,14 +9,12 @@ from __future__ import annotations
 import asyncio
 import logging
 from pathlib import Path
-from typing import Optional
 
 from rich.progress import (
     BarColumn,
     DownloadColumn,
     Progress,
     SpinnerColumn,
-    TaskID,
     TextColumn,
     TimeRemainingColumn,
     TransferSpeedColumn,

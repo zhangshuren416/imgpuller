@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "imgpuller"
-version = "0.1.0"
-description = "Pull OCI/Docker images from registries via HTTP and save as OCI layout"
+version = "0.2.0"
+description = "Pull OCI/Docker images from registries via HTTP and save as a docker-archive .tar"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "imgpuller" }]

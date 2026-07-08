@@ -15,13 +15,10 @@ import hashlib
 import json
 import logging
 from dataclasses import dataclass, field
-from typing import Optional
 
 from imgpuller.config import Platform, detect_current_platform
 from imgpuller.exceptions import (
-    ManifestError,
     PlatformNotFoundError,
-    UnsupportedMediaTypeError,
 )
 from imgpuller.registry.client import RegistryClient
 

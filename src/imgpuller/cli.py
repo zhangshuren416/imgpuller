@@ -1,8 +1,8 @@
 """CLI entry point for imgpuller.
 
 Commands:
-    pull    - Pull an image from a registry and save as OCI layout
-    verify  - Verify integrity of an OCI layout
+    pull    - Pull an image from a registry and save as a docker-archive .tar
+    verify  - Verify integrity of a docker-archive .tar
     inspect - Show manifest details without downloading
 """
 
@@ -12,30 +12,22 @@ import asyncio
 import logging
 import sys
 from pathlib import Path
-from typing import Optional
 
 import click
 from rich.console import Console
 from rich.logging import RichHandler
 from rich.progress import (
-    BarColumn,
-    DownloadColumn,
     Progress,
     SpinnerColumn,
-    TaskProgressColumn,
     TextColumn,
-    TimeRemainingColumn,
-    TransferSpeedColumn,
 )
 
 from imgpuller import __version__
 from imgpuller.config import (
-    ImageReference,
     Platform,
-    RegistryCredentials,
     detect_current_platform,
     get_credentials_for_registry,
-    get_default_output_dir,
+    get_default_output_file,
     load_docker_config,
     parse_image_reference,
     resolve_registry_url,
@@ -43,7 +35,7 @@ from imgpuller.config import (
 from imgpuller.download.manager import DownloadManager
 from imgpuller.exceptions import ImgpullerError
 from imgpuller.manifest.resolver import ManifestResolver
-from imgpuller.oci.layout import OCILayoutWriter
+from imgpuller.oci.docker_save import DockerSaveWriter
 from imgpuller.registry.auth import create_auth_provider
 from imgpuller.registry.client import RegistryClient
 
@@ -74,19 +66,20 @@ def setup_logging(verbose: int = 0) -> None:
     help="Increase verbosity (-v for INFO, -vv for DEBUG)",
 )
 def main(verbose: int = 0):
-    """imgpuller - Pull OCI/Docker images via HTTP and save as OCI layout.
+    """imgpuller - Pull OCI/Docker images via HTTP and save as a tar archive.
 
     Downloads image layers directly from OCI-compliant registries via the
     Docker Registry HTTP API V2. Supports resumable downloads, parallel
-    layer fetching, and SHA256 integrity verification.
+    layer fetching, and SHA256 integrity verification. Output is a single
+    docker-archive .tar file that can be loaded with `docker load -i`.
 
     \b
     Examples:
       imgpuller pull ubuntu:22.04
       imgpuller pull --platform linux/arm64 nginx:alpine
-      imgpuller pull -o ./my-images ubuntu:22.04
+      imgpuller pull -o ./my-image.tar ubuntu:22.04
       imgpuller pull --username user --password-stdin ghcr.io/org/app:v1
-      imgpuller verify ./ubuntu-22.04
+      imgpuller verify ./ubuntu-22.04.tar
     """
     setup_logging(verbose)
 
@@ -99,7 +92,7 @@ def main(verbose: int = 0):
 )
 @click.option(
     "--output", "-o", default=None,
-    help="Output directory. Default: ./<image>-<tag>",
+    help="Output .tar file path. Default: ./<image>-<tag>.tar",
     type=click.Path(path_type=Path),
 )
 @click.option(
@@ -127,6 +120,10 @@ def main(verbose: int = 0):
     help="Do not resume from previous partial downloads.",
 )
 @click.option(
+    "--keep-blobs", is_flag=True, default=False,
+    help="Keep the intermediate blob download directory after tarring.",
+)
+@click.option(
     "--registry", default=None,
     help="Explicit registry URL (overrides auto-detection).",
 )
@@ -144,10 +141,11 @@ def pull(
     insecure: bool,
     no_verify: bool,
     no_resume: bool,
+    keep_blobs: bool,
     registry: str | None,
     proxy: str | None,
 ):
-    """Pull an image from a registry and save as OCI layout.
+    """Pull an image from a registry and save as a docker-archive .tar.
 
     IMAGE is the image reference. Supported formats:
 
@@ -159,17 +157,13 @@ def pull(
       registry.example.com:5000/myapp:v1   Custom registry with port
       ubuntu@sha256:abc...  By digest
 
-    The output is an OCI layout directory that can be imported with tools like:
+    The output is a single .tar file (docker-archive format) that can be
+    loaded directly with:
 
     \b
-      # Using skopeo (recommended)
-      skopeo copy oci:./output docker-daemon:image:tag
-
-      # Using podman
-      podman pull oci:./output
+      docker load -i <output>.tar
+      podman load -i <output>.tar
     """
-    logger = logging.getLogger(__name__)
-
     # Parse image reference
     try:
         if registry:
@@ -200,8 +194,10 @@ def pull(
             console.print(f"[red]Error:[/] Invalid platform: {e}")
             sys.exit(2)
 
-    # Output directory
-    output_dir = output or Path(get_default_output_dir(image_ref))
+    # Output file (.tar) and intermediate blob work directory.
+    output_file = output or Path(get_default_output_file(image_ref))
+    # Work dir holds blobs/sha256/* and .imgpuller-state/ for resume support.
+    work_dir = output_file.parent / (output_file.stem + ".blobs")
 
     # Get password
     password = None
@@ -226,12 +222,13 @@ def pull(
     registry_url = resolve_registry_url(image_ref.registry, insecure=insecure)
 
     console.print(f"[bold]Pulling image:[/] {image_ref}")
-    console.print(f"  Registry: {registry_url}")
-    console.print(f"  Platform: {target_platform or detect_current_platform()}")
-    console.print(f"  Output:   {output_dir.absolute()}")
+    console.print(f"  Registry:  {registry_url}")
+    console.print(f"  Platform:  {target_platform or detect_current_platform()}")
+    console.print(f"  Output:    {output_file.absolute()}")
+    console.print(f"  Work dir:  {work_dir.absolute()}")
 
     if target_platform:
-        console.print(f"  Platform: {target_platform}")
+        console.print(f"  Platform:  {target_platform}")
 
     # Main async workflow
     async def run():
@@ -276,11 +273,11 @@ def pull(
                 f"  Layers:   {len(resolved.layer_digests)}"
             )
 
-            # Download blobs
+            # Download blobs into the work directory
             download_mgr = DownloadManager(
                 client=client,
                 image_name=image_ref.name,
-                output_dir=output_dir,
+                output_dir=work_dir,
                 concurrency=jobs,
                 verify=not no_verify,
             )
@@ -294,26 +291,32 @@ def pull(
                 console.print("[red]Download failed[/]")
                 sys.exit(4)
 
-            # Write OCI layout
-            writer = OCILayoutWriter(output_dir)
-            layout_path = writer.write(
+            # Write docker-archive .tar from downloaded blobs
+            writer = DockerSaveWriter(output_file)
+            tar_path = writer.write(
                 resolved,
-                image_ref=str(image_ref),
+                blobs_dir=work_dir / "blobs" / "sha256",
+                image_ref=image_ref,
             )
 
             # Clean up state on success
             download_mgr.cleanup_state()
 
+            # Remove intermediate blob directory unless asked to keep it.
+            if not keep_blobs:
+                import shutil
+
+                shutil.rmtree(work_dir, ignore_errors=True)
+            else:
+                console.print(f"  Blobs:    {work_dir.absolute()} (kept)")
+
             console.print()
-            console.print(f"[bold green]✓ Image pulled successfully[/]")
-            console.print(f"  Location: {layout_path.absolute()}")
+            console.print("[bold green]✓ Image pulled successfully[/]")
+            console.print(f"  Location: {tar_path.absolute()}")
             console.print()
-            console.print("[bold]Import with:[/]")
+            console.print("[bold]Load with:[/]")
             console.print(
-                f"  skopeo copy oci:{output_dir} docker-daemon:{image_ref.name}:{image_ref.reference}"
-            )
-            console.print(
-                f"  podman pull oci:{output_dir}"
+                f"  docker load -i {tar_path}"
             )
 
         finally:
@@ -338,25 +341,26 @@ def pull(
 @main.command()
 @click.argument("path", type=click.Path(exists=True, path_type=Path))
 def verify(path: Path):
-    """Verify the integrity of an OCI layout directory.
+    """Verify the integrity of a docker-archive .tar file.
 
-    Checks that all blobs match their SHA256 digests and that the
-    OCI layout structure is valid.
+    Checks that the config and every layer.tar match the SHA256 diff IDs
+    declared in the image config, and that layer chain IDs are consistent.
+
+    \b
+    PATH is the .tar file produced by `imgpuller pull`.
     """
-    from imgpuller.oci.layout import OCILayoutWriter
-
-    writer = OCILayoutWriter(path)
+    writer = DockerSaveWriter(path)
     result = writer.verify()
 
     if result["status"] == "ok":
         console.print(
-            f"[green]✓ OCI layout is valid[/] "
-            f"({result['valid']}/{result['checked']} blobs verified)"
+            f"[green]✓ docker-archive is valid[/] "
+            f"({result['valid']}/{result['checked']} entries verified)"
         )
     else:
         console.print(
-            f"[red]✗ OCI layout has issues:[/] "
-            f"({result['valid']}/{result['checked']} blobs valid)"
+            f"[red]✗ docker-archive has issues:[/] "
+            f"({result['valid']}/{result['checked']} entries valid)"
         )
         for error in result["errors"]:
             console.print(f"  [red]- {error}[/]")
@@ -385,6 +389,10 @@ def verify(path: Path):
     "--registry", default=None,
     help="Explicit registry URL.",
 )
+@click.option(
+    "--proxy", default=None,
+    help="HTTP proxy URL (e.g. http://proxy:8080). Also respects HTTP_PROXY env var.",
+)
 def inspect(
     image: str,
     platform: str | None,
@@ -392,13 +400,12 @@ def inspect(
     password_stdin: bool,
     insecure: bool,
     registry: str | None,
+    proxy: str | None,
 ):
     """Inspect an image manifest without downloading layers.
 
     Shows manifest type, layers, platform info, and sizes.
     """
-    logger = logging.getLogger(__name__)
-
     # Parse image reference
     try:
         if registry:
@@ -444,7 +451,7 @@ def inspect(
         )
         try:
             if not await client.check_api():
-                console.print(f"[red]Error:[/] Registry does not support V2 API")
+                console.print("[red]Error:[/] Registry does not support V2 API")
                 sys.exit(3)
 
             resolver = ManifestResolver(client)
@@ -463,7 +470,7 @@ def inspect(
 
             # Config
             config = resolved.manifest.config
-            console.print(f"[bold]Config:[/]")
+            console.print("[bold]Config:[/]")
             console.print(f"  Digest: {config.digest}")
             console.print(f"  Size:   {_format_size(config.size)}")
             console.print(f"  Type:   {config.media_type}")
