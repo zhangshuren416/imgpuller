@@ -57,6 +57,7 @@ class RegistryClient:
         registry_url: str,
         auth_provider: AuthProvider | None = None,
         insecure: bool = False,
+        skip_tls_verify: bool = False,
         proxy: str | None = None,
         max_connections: int = 20,
         connect_timeout: float = 30.0,
@@ -67,7 +68,10 @@ class RegistryClient:
         Args:
             registry_url: Registry base URL (e.g. "https://registry-1.docker.io")
             auth_provider: Auth provider. If None, no auth is attempted.
-            insecure: Allow HTTP connections (no TLS verification).
+            insecure: Allow HTTP connections (downgrades to http://, no TLS).
+            skip_tls_verify: Skip TLS certificate verification while keeping
+                    HTTPS. Useful for self-signed certificates. Has no
+                    additional effect when *insecure* is True.
             proxy: HTTP proxy URL (e.g. "http://proxy:8080"). Also respects
                    HTTP_PROXY/HTTPS_PROXY environment variables.
             max_connections: Max concurrent connections to the registry.
@@ -84,9 +88,13 @@ class RegistryClient:
             os.environ.setdefault("HTTPS_PROXY", proxy)
             os.environ.setdefault("HTTP_PROXY", proxy)
 
-        # Setup TLS/connection config
+        # ssl=False tells aiohttp to skip certificate verification while
+        # still using TLS for https:// URLs.  Both *insecure* (plain HTTP)
+        # and *skip_tls_verify* (HTTPS without cert check) require this.
+        verify_ssl = not (insecure or skip_tls_verify)
+
         connector = aiohttp.TCPConnector(
-            ssl=not insecure,
+            ssl=verify_ssl,
             limit=max_connections,
             limit_per_host=max_connections,
             force_close=False,

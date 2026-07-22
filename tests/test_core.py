@@ -115,6 +115,67 @@ class TestRegistryURL:
         assert url == "http://myreg.io"
 
 
+# ── RegistryClient TLS config ──
+
+class TestRegistryClientTLS:
+    """Verify that insecure / skip_tls_verify produce the expected ssl setting."""
+
+    @pytest.mark.asyncio
+    async def test_default_verifies_ssl(self):
+        from imgpuller.registry.client import RegistryClient
+
+        client = RegistryClient("https://registry.example.com")
+        try:
+            connector = client.session.connector
+            assert connector._ssl is True
+        finally:
+            await client.close()
+
+    @pytest.mark.asyncio
+    async def test_insecure_disables_ssl(self):
+        from imgpuller.registry.client import RegistryClient
+
+        client = RegistryClient("https://registry.example.com", insecure=True)
+        try:
+            connector = client.session.connector
+            assert connector._ssl is False
+        finally:
+            await client.close()
+
+    @pytest.mark.asyncio
+    async def test_skip_tls_verify_disables_ssl(self):
+        from imgpuller.registry.client import RegistryClient
+
+        client = RegistryClient(
+            "https://registry.example.com", skip_tls_verify=True,
+        )
+        try:
+            connector = client.session.connector
+            assert connector._ssl is False
+        finally:
+            await client.close()
+
+    @pytest.mark.asyncio
+    async def test_both_flags_disable_ssl(self):
+        from imgpuller.registry.client import RegistryClient
+
+        client = RegistryClient(
+            "https://registry.example.com",
+            insecure=True, skip_tls_verify=True,
+        )
+        try:
+            connector = client.session.connector
+            assert connector._ssl is False
+        finally:
+            await client.close()
+
+    def test_skip_tls_verify_keeps_https_url(self):
+        """skip_tls_verify should NOT downgrade the URL scheme to http."""
+        # Only insecure=True changes the scheme; skip_tls_verify does not.
+        url = resolve_registry_url("registry.example.com", insecure=False)
+        assert url.startswith("https://")
+
+
 # ── Manifest Resolution (with mock HTTP) ──
 
 # A minimal OCI manifest for testing

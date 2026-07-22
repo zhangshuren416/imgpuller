@@ -112,6 +112,10 @@ def main(verbose: int = 0):
     help="Allow HTTP connections (not recommended).",
 )
 @click.option(
+    "--skip-tls-verify", is_flag=True, default=False,
+    help="Skip TLS certificate verification (for self-signed certs). Keeps HTTPS.",
+)
+@click.option(
     "--no-verify", is_flag=True, default=False,
     help="Skip SHA256 verification after download.",
 )
@@ -139,6 +143,7 @@ def pull(
     password_stdin: bool,
     jobs: int,
     insecure: bool,
+    skip_tls_verify: bool,
     no_verify: bool,
     no_resume: bool,
     keep_blobs: bool,
@@ -231,6 +236,7 @@ def pull(
             registry_url=registry_url,
             auth_provider=auth_provider,
             insecure=insecure,
+            skip_tls_verify=skip_tls_verify,
             proxy=proxy,
         )
 
@@ -377,6 +383,10 @@ def verify(path: Path):
     help="Allow HTTP connections.",
 )
 @click.option(
+    "--skip-tls-verify", is_flag=True, default=False,
+    help="Skip TLS certificate verification (for self-signed certs). Keeps HTTPS.",
+)
+@click.option(
     "--registry", default=None,
     help="Explicit registry URL.",
 )
@@ -390,6 +400,7 @@ def inspect(
     username: str | None,
     password_stdin: bool,
     insecure: bool,
+    skip_tls_verify: bool,
     registry: str | None,
     proxy: str | None,
 ):
@@ -438,6 +449,7 @@ def inspect(
             registry_url=registry_url,
             auth_provider=auth_provider,
             insecure=insecure,
+            skip_tls_verify=skip_tls_verify,
             proxy=proxy,
         )
         try:
