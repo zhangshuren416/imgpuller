@@ -84,7 +84,12 @@ class DownloadManager:
         Raises:
             DownloadError: If any blob fails after retries.
         """
-        all_digests = resolved.all_blob_digests
+        # A manifest may list the same layer digest more than once (e.g.
+        # multi-stage builds with identical layers). Download each unique
+        # blob only once: duplicate tasks would race on the same file and
+        # corrupt it. Order is preserved; the tar writer still emits one
+        # layer entry per manifest position.
+        all_digests = list(dict.fromkeys(resolved.all_blob_digests))
 
         # Map each blob digest to its declared size from the manifest so the
         # progress bars can show concrete totals (bytes downloaded / total).

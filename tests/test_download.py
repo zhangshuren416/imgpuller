@@ -1,6 +1,7 @@
 """Tests for DownloadManager progress reporting and blob download flow."""
 from __future__ import annotations
 
+import asyncio
 import hashlib
 from unittest import mock
 
@@ -205,3 +206,79 @@ class TestDownloadManagerProgress:
 
         # Final file is complete and correct.
         assert (blobs_dir / layer_hex).read_bytes() == layer_data
+
+
+class TestDuplicateLayers:
+    """Manifests may list the same layer digest twice (multi-stage builds).
+
+    Each unique blob must be downloaded exactly once; duplicate entries must
+    not spawn concurrent writers on the same file.
+    """
+
+    @pytest.mark.asyncio
+    async def test_duplicate_layer_downloaded_once(self, tmp_path):
+        config_data = b'{"architecture":"amd64","os":"linux","rootfs":{}}'
+        layer_data = b"same-layer-content" * 50
+
+        config_digest = _digest(config_data)
+        layer_digest = _digest(layer_data)
+
+        manifest = ImageManifest(
+            schema_version=2,
+            media_type="application/vnd.oci.image.manifest.v1+json",
+            config=Descriptor(
+                media_type="application/vnd.oci.image.config.v1+json",
+                digest=config_digest,
+                size=len(config_data),
+            ),
+            layers=[
+                Descriptor(
+                    media_type="application/vnd.oci.image.layer.v1.tar+gzip",
+                    digest=layer_digest,
+                    size=len(layer_data),
+                ),
+                Descriptor(
+                    media_type="application/vnd.oci.image.layer.v1.tar+gzip",
+                    digest=layer_digest,
+                    size=len(layer_data),
+                ),
+            ],
+            raw_bytes=b"",
+        )
+        resolved = ResolvedImage(
+            manifest=manifest,
+            config_digest=config_digest,
+            layer_digests=[layer_digest, layer_digest],
+            platform=Platform(os="linux", architecture="amd64"),
+            annotations={},
+        )
+
+        blob_data = {config_digest: config_data, layer_digest: layer_data}
+        calls: list[tuple[str, str, int]] = []
+
+        async def fake_get_blob(name, digest, offset=0, chunk_callback=None):
+            calls.append((name, digest, offset))
+            data = blob_data[digest]
+            if offset > 0:
+                data = data[offset:]
+            yield data
+
+        client = mock.AsyncMock()
+        client.get_blob = fake_get_blob
+
+        mgr = DownloadManager(
+            client=client,
+            image_name="library/test",
+            output_dir=tmp_path,
+            concurrency=2,
+            verify=True,
+        )
+        result = await mgr.download_all(resolved)
+
+        assert result is True
+        # config + 1 layer, not config + 2 layers
+        assert len(calls) == 2
+        assert calls.count(("library/test", layer_digest, 0)) == 1
+
+        hex_d = layer_digest.split(":", 1)[1]
+        assert (tmp_path / "blobs" / "sha256" / hex_d).read_bytes() == layer_data
