@@ -15,14 +15,14 @@
 - **完整性校验**：流式 SHA256 计算，边下载边校验；打包时再次校验每层 diff ID
 - **并行下载**：多层并发下载，可配置并发数 (1-16)
 - **多架构支持**：自动解析 manifest list，按平台选择匹配的镜像
-- **认证支持**：Token 认证 (Bearer)、Basic 认证、Docker config.json 证书读取
+- **认证支持**：Token 认证 (Bearer)、Basic 认证、Docker config.json 凭据读取
 - **代理支持**：支持 HTTP/HTTPS 代理，自动读取 `HTTP_PROXY`/`HTTPS_PROXY` 环境变量
 
 ## 安装
 
 ```bash
 # 从源码安装
-git clone https://github.com/zhangshuren/imgpuller.git
+git clone https://github.com/zhangshuren416/imgpuller.git
 cd imgpuller
 pip install -e .
 ```
@@ -111,7 +111,8 @@ imgpuller pull [OPTIONS] IMAGE
 | `--password-stdin` | 从 stdin 读取密码 |
 | `-j, --jobs` | 并行下载数 (1-16, 默认 4) |
 | `--proxy` | HTTP 代理 URL |
-| `--insecure` | 允许 HTTP 连接 |
+| `--insecure` | 允许明文 HTTP 连接 |
+| `--skip-tls-verify` | 跳过 TLS 证书校验（保留 HTTPS） |
 | `--no-verify` | 跳过 SHA256 校验 |
 | `--no-resume` | 不恢复之前的下载进度 |
 | `--keep-blobs` | 生成 `.tar` 后保留中间 blob 下载目录 |
