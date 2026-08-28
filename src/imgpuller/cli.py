@@ -242,10 +242,12 @@ def pull(
 
         try:
             # Check API
-            if not await client.check_api():
+            if not await client.check_api(
+                name=image_ref.name, reference=image_ref.reference
+            ):
                 console.print(
                     f"[red]Error:[/] Registry at {registry_url} does not support "
-                    f"the V2 API"
+                    f"the V2 API (or could not be reached)"
                 )
                 sys.exit(3)
 
@@ -453,8 +455,13 @@ def inspect(
             proxy=proxy,
         )
         try:
-            if not await client.check_api():
-                console.print("[red]Error:[/] Registry does not support V2 API")
+            if not await client.check_api(
+                name=image_ref.name, reference=image_ref.reference
+            ):
+                console.print(
+                    f"[red]Error:[/] Registry at {registry_url} does not "
+                    f"support the V2 API (or could not be reached)"
+                )
                 sys.exit(3)
 
             resolver = ManifestResolver(client)

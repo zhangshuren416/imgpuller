@@ -124,19 +124,89 @@ class RegistryClient:
     async def __aexit__(self, *args):
         await self.close()
 
-    async def check_api(self) -> bool:
-        """Check if the registry supports the V2 API.
+    async def check_api(
+        self,
+        name: str | None = None,
+        reference: str | None = None,
+    ) -> bool:
+        """Check whether the registry supports the Docker Registry HTTP API V2.
+
+        First pings GET /v2/; if that is inconclusive (unusual status code,
+        non-registry error body, or network failure) and *name*/*reference*
+        are given, probes a real V2 endpoint (the manifest URL) before giving
+        up. Many mirrors and CDN-fronted registries do not implement the
+        /v2/ ping correctly (403/404/405) while fully supporting the actual
+        manifest/blob endpoints, so a ping failure alone must not be treated
+        as "not V2".
+
+        Args:
+            name: Image name (e.g. "library/ubuntu") used for the fallback
+                manifest probe.
+            reference: Tag or digest used for the fallback manifest probe.
 
         Returns:
-            True if V2 API is available.
+            True if the registry speaks (or appears to speak) V2.
         """
+        # 1) Standard ping: 200 = supported, 401 = supported but needs auth.
+        #    Give the ping a short timeout so dead/slow registries fail fast.
+        ping_timeout = aiohttp.ClientTimeout(
+            total=15,
+            connect=self._connect_timeout,
+            sock_connect=self._connect_timeout,
+        )
         try:
-            async with self.session.get(f"{self.registry_url}/v2/") as resp:
-                # 200 = supported, 401 = supported but needs auth
-                return resp.status in (200, 401)
+            async with self.session.get(
+                f"{self.registry_url}/v2/",
+                timeout=ping_timeout,
+                allow_redirects=True,
+            ) as resp:
+                if resp.status in (200, 401):
+                    return True
+                # Some registries identify as V2 even on non-200 pings.
+                if (
+                    resp.headers.get("Docker-Distribution-Api-Version", "")
+                    == "registry/2.0"
+                ):
+                    return True
+                logger.debug(
+                    "V2 ping returned HTTP %d; probing a real endpoint",
+                    resp.status,
+                )
         except aiohttp.ClientError as e:
-            logger.debug("Registry API check failed: %s", e)
-            return False
+            logger.debug("Registry API ping failed: %s", e)
+
+        # 2) Fallback: probe a real V2 endpoint. Any HTTP answer on the
+        #    manifest path (2xx/401/404/405/429/5xx) means the registry
+        #    serves V2 routes; a genuine problem (missing image, auth) will
+        #    then surface later with an accurate error message instead of a
+        #    misleading "does not support V2 API".
+        if name and reference:
+            try:
+                url = f"{self.registry_url}/v2/{name}/manifests/{reference}"
+                headers = {"Accept": ", ".join(MANIFEST_ACCEPT_HEADERS)}
+
+                # Apply auth like a real request so registries that require
+                # credentials aren't misdiagnosed as "unsupported".
+                if self.auth_provider:
+                    if hasattr(self.auth_provider, "get_token"):
+                        token = self.auth_provider.get_token(url, name)
+                        if token:
+                            headers["Authorization"] = f"Bearer {token}"
+                    await self.auth_provider.apply_auth(
+                        self.session, "GET", url, headers, name
+                    )
+
+                async with self.session.get(
+                    url, headers=headers, allow_redirects=True
+                ) as resp:
+                    logger.debug(
+                        "V2 endpoint probe returned HTTP %d", resp.status
+                    )
+                    return True
+            except aiohttp.ClientError as e:
+                logger.debug("V2 endpoint probe failed: %s", e)
+
+        return False
 
     async def get_manifest(
         self, name: str, reference: str

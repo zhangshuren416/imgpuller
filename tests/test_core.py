@@ -812,3 +812,131 @@ class TestDockerSaveWriter:
             DockerSaveWriter(output_tar).write(
                 resolved, blobs_dir=blobs_dir, image_ref=image_ref,
             )
+
+
+# ── V2 API capability check ──
+
+class TestCheckApi:
+    """check_api must tolerate registries with quirky /v2/ ping responses.
+
+    Some mirrors/CDN-fronted registries answer GET /v2/ with 403/404/405
+    while fully implementing the real manifest/blob endpoints, so the
+    check falls back to probing an actual V2 route.
+    """
+
+    def make_client(self, responses):
+        """Build a RegistryClient whose session.get returns prepared responses.
+
+        Each entry in *responses* is a dict with status/headers, or an
+        exception instance to raise. Records (url, kwargs) in client._calls.
+        """
+        from contextlib import asynccontextmanager
+
+        from imgpuller.registry.client import RegistryClient
+
+        client = RegistryClient("https://registry.example.com")
+        calls = []
+
+        @asynccontextmanager
+        async def fake_get(url, **kwargs):
+            calls.append((url, kwargs))
+            item = responses[len(calls) - 1]
+            if isinstance(item, Exception):
+                raise item
+            resp = mock.AsyncMock()
+            resp.status = item["status"]
+            resp.headers = item.get("headers", {})
+            yield resp
+
+        client.session.get = fake_get
+        client._calls = calls
+        return client
+
+    @pytest.mark.asyncio
+    async def test_ping_200_supported(self):
+        client = self.make_client([{"status": 200}])
+        try:
+            assert await client.check_api(
+                name="library/ubuntu", reference="22.04"
+            ) is True
+            assert len(client._calls) == 1  # no fallback probe needed
+        finally:
+            await client.close()
+
+    @pytest.mark.asyncio
+    async def test_ping_401_supported(self):
+        client = self.make_client([{"status": 401}])
+        try:
+            assert await client.check_api(
+                name="library/ubuntu", reference="22.04"
+            ) is True
+        finally:
+            await client.close()
+
+    @pytest.mark.asyncio
+    async def test_ping_404_then_manifest_200(self):
+        """Mirror that doesn't implement /v2/ ping but serves real endpoints."""
+        client = self.make_client([{"status": 404}, {"status": 200}])
+        try:
+            assert await client.check_api(
+                name="library/ubuntu", reference="22.04"
+            ) is True
+            url, kwargs = client._calls[1]
+            assert url.endswith("/v2/library/ubuntu/manifests/22.04")
+            assert "Accept" in kwargs["headers"]
+        finally:
+            await client.close()
+
+    @pytest.mark.asyncio
+    async def test_ping_403_with_distribution_header(self):
+        """Docker-Distribution-Api-Version header marks the registry as V2."""
+        client = self.make_client([
+            {
+                "status": 403,
+                "headers": {
+                    "Docker-Distribution-Api-Version": "registry/2.0",
+                },
+            },
+        ])
+        try:
+            assert await client.check_api(
+                name="library/ubuntu", reference="22.04"
+            ) is True
+            assert len(client._calls) == 1
+        finally:
+            await client.close()
+
+    @pytest.mark.asyncio
+    async def test_ping_403_then_manifest_answers(self):
+        """Registry that rejects the ping but answers the manifest route."""
+        client = self.make_client([{"status": 403}, {"status": 404}])
+        try:
+            assert await client.check_api(
+                name="library/ubuntu", reference="22.04"
+            ) is True
+        finally:
+            await client.close()
+
+    @pytest.mark.asyncio
+    async def test_ping_and_probe_unreachable_false(self):
+        import aiohttp
+
+        client = self.make_client([
+            aiohttp.ClientConnectionError("ping failed"),
+            aiohttp.ClientConnectionError("probe failed"),
+        ])
+        try:
+            assert await client.check_api(
+                name="library/ubuntu", reference="22.04"
+            ) is False
+        finally:
+            await client.close()
+
+    @pytest.mark.asyncio
+    async def test_ping_404_without_probe_info_false(self):
+        """Without name/reference there is no endpoint left to probe."""
+        client = self.make_client([{"status": 404}])
+        try:
+            assert await client.check_api() is False
+        finally:
+            await client.close()
