@@ -6,9 +6,17 @@ build-backend = "hatchling.build"
 name = "imgpuller"
 version = "0.1.2"
 description = "Pull OCI/Docker images from registries via HTTP and save as a docker-archive .tar"
-requires-python = ">=3.10"
+requires-python = ">=3.9"
 license = { text = "MIT" }
 authors = [{ name = "imgpuller" }]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
 dependencies = [
     "aiohttp>=3.9,<4.0",
     "aiofiles>=23.0,<25.0",
