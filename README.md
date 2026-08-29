@@ -1,6 +1,6 @@
 # imgpuller
 
-[![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://www.python.org/)
+[![Python](https://img.shields.io/badge/Python-3.9+-blue.svg)](https://www.python.org/)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 **imgpuller** 是一个不依赖 Docker/Podman CLI，直接通过 HTTP 从 OCI 兼容的 Registry 拉取镜像的工具。
@@ -27,7 +27,7 @@ cd imgpuller
 pip install -e .
 ```
 
-依赖：`aiohttp`、`aiofiles`、`click`、`rich`，Python 3.10+
+依赖：`aiohttp`、`aiofiles`、`click`、`rich`，Python 3.9+
 
 安装后可使用 `imgpuller` 命令：
 
